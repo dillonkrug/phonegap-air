@@ -1,97 +1,114 @@
 /**
  * A simple server that serves the contents of the www folder
  */
-
-var finalhandler = require('finalhandler'),
-	serveStatic = require('serve-static'),
-	http = require('http'),
+var _ = require('lodash'),
+	Promise = require('bluebird'),
+	fs = Promise.promisifyAll(require('fs')),
 	path = require('path'),
-	fs = require('fs'),
-	async = require('async'),
 	crypto = require('crypto'),
 	wwwDir = path.join(__dirname, 'www'),
 	appPath = path.join(wwwDir, 'app.js'),
-	serve = serveStatic(wwwDir),
-	server, buildManifest, sendManifest, cachedManifest;
+	express = require('express'),
+	app = express();
 
 // Replace app.js placeholder so the apps know where they pulled from
-fs.readFile(appPath, function(err, data) {
-	if (err) throw err;
 
-	var replaced = data.toString().replace(/{{environment}}/, process.env.NODE_ENV);
+var cachedManifest = false,
+	cachedAppJs = false;
 
-	fs.writeFile(appPath, replaced, function(err) {
-		if (err) throw err;
-	});
-});
+function getAppJs(asBuffer) {
+	cachedAppJs = fs.readFileAsync(appPath, 'UTF8').
+		then(function (data) {
+			data = data.replace(/\{\{environment\}\}/g, process.env.NODE_ENV);
+			return asBuffer ? new Buffer(data) : data;
+		});
 
-sendManifest = function _sendManifest(res) {
-	var manifest = JSON.parse(cachedManifest);
+	return cachedAppJs;
 
-	manifest.message = 'The version updates every second when not in production';
+}
 
-	// Pin the production version so that we can test the redundant update logic
-	if (process.env.NODE_ENV == 'production') {
-		manifest.version = '1.1.0';
-	} else {
-		manifest.version = '1.1.' + Math.round(Date.now() / 1000);
-	}
-
-	manifest = JSON.stringify(manifest);
-
-	res.writeHead(200, {
-		'content-length': manifest.length,
-		'content-type': 'application/json'
-	});
-
-	res.end(manifest);
-};
-
-buildManifest = function _buildManifest(req, res, done) {
-	if (cachedManifest) {
-		sendManifest(res);
-	} else {
-		fs.readdir(wwwDir, function(err, files) {
-			if (err) return done(err);
-
-			cachedManifest = {
-				files: {},
+function buildManifest () {
+	console.log('Building manifest');
+	cachedManifest = fs.readdirAsync(wwwDir).
+		map(function (file) {
+			if (file === 'app.js') {
+				return Promise.props({
+					name: 'app.js',
+					data: getAppJs(true)
+				});
+			}
+			var fullPath = path.join(wwwDir, file);
+			return fs.readFileAsync(fullPath).
+				then(function (data) {
+					return {
+						name: file,
+						data: data
+					};
+				});
+		}).
+		then(function (files) {
+			return {
+				files: _.reduce(files, function(out, file) {
+					out[file.name] = {
+						checksum: crypto.createHash('md5').update(file.data).digest('hex'),
+						destination: file.name,
+						source: '/' + file.name
+					};
+					return out;
+				}, {}),
 				assets: []
 			};
-
-			async.map(files, function(filename, next) {
-				var filepath = path.join(wwwDir, filename);
-
-				fs.readFile(filepath, function(err, data) {
-					if (err) return next(err);
-
-					cachedManifest.files[filename] = {
-						checksum: crypto.createHash('md5').update(data).digest('hex'),
-						destination: filename,
-						source: '/' + filename
-					};
-
-					next();
-				});
-			}, function(err) {
-				if (err) return done(err);
-
-				cachedManifest = JSON.stringify(cachedManifest);
-
-				sendManifest(res);
-			});
 		});
-	}
-};
+	return cachedManifest;
+}
 
-server = http.createServer(function(req, res) {
-	var done = finalhandler(req, res);
 
-	if (require('url').parse(req.url).pathname == '/manifest.json') {
-		buildManifest(req, res, done);
-	} else {
-		serve(req, res, done);
-	}
+function serveManifest (req, res) {
+	console.log('sending manifest');
+	Promise.resolve().
+		then(function () {
+			return cachedManifest || buildManifest();
+		}).
+		then(function (manifest) {
+			manifest.message = 'The version updates every second when not in production';
+
+			// Pin the production version so that we can test the redundant update logic
+			if (process.env.NODE_ENV === 'production') {
+				manifest.version = '1.1.0';
+			} else {
+				manifest.version = '1.1.' + Math.round(Date.now() / 1000);
+			}
+
+			res.send(manifest);
+		});
+}
+
+function serveAppJs (req, res) {
+	Promise.resolve().
+		then(function () {
+			return cachedAppJs || getAppJs();
+		}).
+		then(function(content) {
+			res.set('Content-Type', 'application/javascript');
+			res.send(content);
+		});
+
+}
+app.use(function (req, res, next) {
+	console.log(req.originalUrl);
+	next();
 });
 
-server.listen(process.env.PORT || 8080);
+app.get('/manifest.json', serveManifest);
+app.get('/app.js', serveAppJs);
+
+app.use(express.static(wwwDir));
+
+app.listen(process.env.PORT || 8000, function (err) {
+	if (err) {
+		console.error('Error starting server');
+		console.error(err);
+	} else {
+		console.log('Server listing on port', process.env.PORT || 8000);
+	}
+});

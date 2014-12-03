@@ -1,4 +1,6 @@
-document.addEventListener('deviceReady', function() {
+(function (window, document) {
+
+document.addEventListener('deviceReady', function () {
 	var metaInfo = '{{environment}} app',
 		metaInfoNode = document.createTextNode(metaInfo);
 	document.getElementById('loading').className = 'hidden';
@@ -6,6 +8,11 @@ document.addEventListener('deviceReady', function() {
 	document.getElementById('meta').appendChild(metaInfoNode);
 }, false);
 
-window.shouldAllowOTADevTools = function() {
-	return true;
-};
+function shouldAllowOTADevTools () {
+	return true;	
+}
+
+window.shouldAllowOTADevTools = shouldAllowOTADevTools;
+
+}(window, document));
+
